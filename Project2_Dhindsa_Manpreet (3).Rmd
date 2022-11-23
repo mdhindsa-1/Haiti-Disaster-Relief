@@ -1,0 +1,1632 @@
+Title: Disaster Relief Project: Part II
+
+Author: Manpreet Dhindsa
+
+Date: 08/15/21
+
+```{r global_options, include=FALSE}
+knitr::opts_chunk$set(cache = TRUE,
+                      error=TRUE,        # Keep compiling upon error
+                      collapse=FALSE,    # collapse by default
+                      echo=TRUE,         # echo code by default
+                      comment = "#>",    # change comment character
+                      fig.align = "center",# set figure position
+                      out.width = "75%", # set width of displayed images
+                      warning=FALSE,      # show R warnings
+                      message=TRUE)      # show R messages
+```
+
+<!--- Change font sizes (or other css modifications) --->
+<style>
+h1.title {
+  font-size: 2.2em; /* Title font size */
+}
+h1 {
+  font-size: 2em;   /* Header 1 font size */
+}
+h2 {
+  font-size: 1.5em;
+}
+h3 { 
+  font-size: 1.2em;
+}
+pre {
+  font-size: 0.8em;  /* Code and R output font size */
+}
+</style>
+
+
+
+**DS 6030 | Summer 2021 | University of Virginia **
+
+*******************************************
+
+# Introduction 
+
+This project is meant to help with locating displaced people living in blue-tarp shelters after an earthquake in Haiti. We are using pixel data to help us efficiently and accurately locate those under blue tarps since those are likely individuals that need help.  
+
+First, I am using the training data to train the model and determine the tuning parameters and threshold. Then, I will apply all tuned models to the hold out data to calculate performance metrics using the tuning parameters and thresholds determined with the training data. 
+
+## Load Required Packages
+
+```{r}
+#-- Load Required Packages
+#install.packages("tidymodels")
+library(tidyverse)
+library(broom)
+library(tidymodels)
+library(randomForest)
+```
+
+## Load and Clean Data
+
+For the first part of this project, it is important to load in the data properly and ensure that Class is a factor variable with two classes: Blue_Tarp or Other since the goal of this project is to locate as many blue tarps as possible. It is not necessary to differentiate between soil, rooftops, vegetation or various non-tarp, so I have grouped and labeled all of them as Other. 
+
+
+```{r}
+#-- Load Data
+
+Haiti = read.csv("HaitiPixels.csv")
+```
+
+```{r}
+Haiti = Haiti[, c('Blue', 'Green', 'Red', 'Class')]
+
+#make Class a factor variable
+
+Haiti$Class= factor(Haiti$Class)
+levels(Haiti$Class)
+```
+
+```{r}
+levels(Haiti$Class) = list("Blue_Tarp" = c("Blue Tarp"),
+                               "Other"   = c("Rooftop","Soil","Various Non-Tarp","Vegetation"))
+
+Haiti$Class = relevel(Haiti$Class, ref = "Blue_Tarp")
+contrasts(Haiti$Class)
+```
+
+```{r}
+# check for missing data
+any(is.null(Haiti))
+```
+
+## EDA
+
+```{r}
+#EDA
+
+# Box Plots
+par(mfrow=c(1,3))
+boxplot(Haiti$Red~Haiti$Class, main = "Boxplot of Red against Classes")
+boxplot(Haiti$Green~Haiti$Class, main = "Boxplot of Green against Classes")
+boxplot(Haiti$Blue~Haiti$Class, main = "Boxplot of Blue against Classes")
+```
+
+
+These boxplots are helpful to see that Red has a much wider distribution in the group of all other objects than the blue tarp group. For Green, there are similar results to Red. With both red and green, the distributions between Blue Tarp and Other overlap with each other. However, with Blue, the distributions are more clearly distinct between Blue Tarp and Other. This logically makes sense because the blue tarps should have higher values of blue as compared to the other items. 
+
+```{r}
+#summary stats of variables
+plot(Haiti$Class)
+
+summary(Haiti$Red)
+summary(Haiti$Green)
+summary(Haiti$Blue)
+
+```
+
+
+From the plot, we can see that this data set is fairly uneven with almost over 60,000 observations in the "Other" group while there are less than 5,000 observations of blue tarps. Additionally, with the summary statistics, Green and Red for the most part are very similar, however, Blue is lower than both for the most part. 
+
+## Model Training 
+
+### Set Up
+
+When setting up the data, there is no need to split into training and test set because this initial entire data set will be used as the training data set to determine tuning parameters and thresholds. Then, I will use the hold out data to test these models with the established tuning parameters and thresholds. 
+
+### Setting up Functions
+
+I have set up functions to easily calculate 10-Fold Cross Validation as well as Confusion Matrix and Performance Metrics values because these functions are used for each of the seven models that I am training on. Therefore, it is more efficient to create a function for these processes. 
+
+```{r}
+# Function for 10-Fold Cross Validations
+
+library(tidyverse)
+library(glmnet)
+library(caret)
+
+set.seed(1)
+
+trControl = caret::trainControl(method="cv",
+                        number=10,
+                        savePredictions=TRUE,
+                        classProbs=TRUE,
+                        allowParallel=TRUE)
+
+# Function for Confusion Matrix and Performance Metrics
+
+calculateConfusionMatrix = function(model, data, threshold) {
+  prediction = predict(model, data, type='prob')$Blue_Tarp
+  predClass = as.factor(ifelse(prediction > threshold, 'Blue_Tarp', 'Other'))
+  return (confusionMatrix(data=predClass, reference=data$Class))
+}
+
+```
+
+## Logistic Regression
+
+With logistic regression, before using cross-validation to determine the tuning parameters, I wanted to use forward, backward, and stepwise tests to see if all three predictors are needed as well as to see if interaction would be necessary for the three predictors.
+
+Therefore, I created a model with all three predictors but no interaction, then a model with interactions between all three predictors, and finally a model with no predictors. I first tested between no predictors and all predictors without interactions to understand if all three predictors are needed. It was established that all three predictors are needed. I then tested no interactions with interactions to see if interaction terms are needed for this model, which showed that no interaction is needed. 
+
+```{r}
+#creating model without interactions
+reg = glm(Haiti$Class ~ Haiti$Red + Haiti$Green + Haiti$Blue, data = Haiti, family = "binomial")
+summary(reg)
+
+#creating model to test interactions
+reg2 = glm(Haiti$Class ~ Haiti$Red*Haiti$Green*Haiti$Blue, data = Haiti, family = "binomial")
+summary(reg2)
+
+#creating a model with no predictors
+regnull = glm(Haiti$Class ~ 1, data = Haiti, family = "binomial")
+```
+
+```{r}
+#forward, backward, and stepwise between no predictors and model without interactions
+#step(reg, scope=list(lower=regnull, upper=reg), direction="backward")
+#step(reg, scope=list(lower=regnull, upper=reg), direction="forward")
+#step(reg, scope=list(lower=regnull, upper=reg), direction="both")
+#use red, green, blue
+
+#forward, backward, and stepwise between without interaction and with interaction
+#step(reg, scope=list(lower=reg, upper=reg2), direction="backward")
+#step(reg, scope=list(lower=reg, upper=reg2), direction="forward")
+#step(reg, scope=list(lower=reg, upper=reg2), direction="both")
+```
+
+
+I have commented out these lines for the project, but the results indicate that I should use a model of Class ~ Red + Green + Blue as supported by all backwards tests. As observed from all three tests comparing a model with these three predictors to a model without any predictors, I can see that all three predictors are needed. Regarding interaction, it does not seem that any interaction is necessary. I observed different results between forward and both, however, the backwards test supported including all three predictors without any interaction.
+
+### 10-Fold Cross Validation for Logistic Regression
+
+
+```{r}
+# install.packages("caret")
+#https://topepo.github.io/caret/model-training-and-tuning.html
+set.seed(1)
+LogRegModel = train(Class ~ Blue + Red + Green, data=Haiti, 
+                 method='glm', 
+                 family='binomial',
+                 metric='ROC',
+                 trControl=trControl) 
+
+LogRegModel
+```
+
+
+According to https://topepo.github.io/caret/available-models.html, there are no tuning parameters for glm, and the accuracy is very high, which indicates that this may be a useful model for this project.  
+
+### Determining the Threshold
+
+```{r}
+LogRegResult = thresholder(LogRegModel, seq(0,1, by=0.05), final = TRUE, statistics = "all")
+```
+
+
+I am using two plots for all models to determine the threshold: a plot of the positive prediction value with a line of the negative prediction value to compare. I am also using a plot of the precision. Therefore, looking at both plots, I will determine the optimal threshold that results in a high value in each of the plots. 
+
+
+```{r}
+plot(LogRegResult$prob_threshold, LogRegResult$`Pos Pred Value`)
+lines(LogRegResult$prob_threshold, LogRegResult$`Neg Pred Value`)
+
+plot(LogRegResult$prob_threshold, LogRegResult$Precision)
+
+# using Precision and Positive Prediction value, check for highest value for the threshold
+threshold = 0.3
+```
+
+
+For the Confusion Matrix and Performance Metrics threshold, I am more concerned about False Negatives (classifying an actual blue tarp as not a blue tarp) because I want to make sure that I am capturing all blue tarps and not potentially miss any. 
+
+In this case, the threshold that resulted in the highest precision and positive prediction value is 0.3.
+
+### Confusion Matrix and Performance Metrics for Logistic Regression
+
+```{r}
+cm = calculateConfusionMatrix(LogRegModel, Haiti, threshold)
+cm$overall['Accuracy']
+cm$byClass
+```
+
+
+The values seen here for these metrics are for the most part high performing. The sensitivity is slightly lower at 0.91,but the other values such as accuracy, precision, and specificity are fairly high. 
+
+### ROC Curve and AUC for Logistic Regression
+
+```{r}
+library(ROCR)
+pred1 = predict(LogRegModel,Haiti, type = "prob")
+pred1 = prediction(pred1$Other, Haiti$Class)
+roc1 = performance(pred1,"tpr","fpr")
+plot(roc1, lwd = 2)
+abline(a = 0, b = 1) 
+
+auc1 = performance(pred1, measure = "auc")
+auc1@y.values[[1]]
+```
+
+
+This is a very high value of AUC, and therefore, this model classifies between blue tarps and other material well. 
+
+## LDA
+
+```{r}
+library(MASS)
+lda=lda(Haiti$Class~ Haiti$Red + Haiti$Green + Haiti$Blue, data=Haiti)
+lda
+plot(lda)
+```
+
+
+### 10-Fold Cross Validation for LDA
+
+```{r}
+set.seed(1)
+LDAModel = train(Class ~ Blue + Red + Green, data=Haiti, 
+                 method='lda', 
+                 family='binomial',
+                 metric='ROC',
+                 trControl=trControl) 
+
+LDAModel
+```
+
+
+According to https://topepo.github.io/caret/available-models.html, there are no tuning parameters for LDA, and the accuracy is fairly strong. 
+
+### Determining the Threshold
+
+```{r}
+LDAResult = thresholder(LDAModel, seq(0,1, by=0.05), final = TRUE, statistics = "all")
+```
+
+```{r}
+plot(LDAResult$prob_threshold, LDAResult$`Pos Pred Value`)
+lines(LDAResult$prob_threshold, LDAResult$`Neg Pred Value`)
+
+plot(LDAResult$prob_threshold, LDAResult$Precision)
+
+# using Precision and Positive Prediction value, check for highest value for the threshold
+threshold2 = 0.9
+```
+
+
+For the Confusion Matrix and Performance Metrics threshold, I am more concerned about False Negatives (classifying a blue tarp as not a blue tarp) because I want to make sure that I am capturing all blue tarps and not potentially miss any. 
+
+Therefore, the threshold that results in the highest precision and positive prediction value is 0.9.
+
+
+### Confusion Matrix and Performance Metrics for LDA
+
+```{r}
+cm2 = calculateConfusionMatrix(LDAModel, Haiti, threshold2)
+cm2$overall['Accuracy']
+cm2$byClass
+```
+
+
+The metrics for LDA do not perform as well especially in terms of sensitivity and precision around .75. This is most likely not well-performing enough for the scenario of locating blue tarps. 
+
+### ROC Curve and AUC for LDA
+
+```{r}
+
+library(ROCR)
+pred2 = predict(LDAModel,Haiti, type = "prob")
+pred2 = prediction(pred2$Other, Haiti$Class)
+roc2 = performance(pred2,"tpr","fpr")
+plot(roc2, lwd = 2)
+abline(a = 0, b = 1) 
+
+auc2 = performance(pred2, measure = "auc")
+auc2@y.values[[1]]
+```
+
+
+This AUC value is fairly high but does not perform as well as logistic regression. 
+
+## QDA
+
+```{r}
+library(MASS)
+qda=qda(Haiti$Class~ Haiti$Red + Haiti$Green + Haiti$Blue, data=Haiti)
+qda
+```
+
+
+### 10-Fold Cross Validation for QDA
+
+```{r}
+set.seed(1)
+QDAModel = train(Class ~ Blue + Red + Green, data=Haiti, 
+                 method='qda', 
+                 family='binomial',
+                 metric='ROC',
+                 trControl=trControl) 
+
+QDAModel
+```
+
+
+According to https://topepo.github.io/caret/available-models.html, there are no tuning parameters for QDA, and the accuracy is high. 
+
+### Determining the Threshold
+
+```{r}
+QDAResult = thresholder(QDAModel, seq(0,1, by=0.05), final = TRUE, statistics = "all")
+```
+
+```{r}
+plot(QDAResult$prob_threshold, QDAResult$`Pos Pred Value`)
+lines(QDAResult$prob_threshold, QDAResult$`Neg Pred Value`)
+
+plot(QDAResult$prob_threshold, QDAResult$Precision)
+
+# using Precision and Positive Prediction value, check for highest value for the threshold
+threshold3 = 0.4
+```
+
+
+For the Confusion Matrix and Performance Metrics threshold, I am more concerned about False Negatives (classifying a blue tarp as not a blue tarp) because I want to make sure that I am capturing all blue tarps and not potentially miss any. 
+
+Therefore, the threshold that results in the highest precision and positive prediction value is 0.4.
+
+
+### Confusion Matrix and Performance Metrics for QDA
+
+```{r}
+cm3 = calculateConfusionMatrix(QDAModel, Haiti, threshold3)
+cm3$overall['Accuracy']
+cm3$byClass
+```
+
+
+The values in this performance table are much better than what was seen for LDA. The sensitivity is still low though.
+
+### ROC Curve and AUC for QDA
+
+```{r}
+
+library(ROCR)
+pred3 = predict(QDAModel,Haiti, type = "prob")
+pred3 = prediction(pred3$Other, Haiti$Class)
+roc3 = performance(pred3,"tpr","fpr")
+plot(roc3, lwd = 2)
+abline(a = 0, b = 1) 
+
+auc3 = performance(pred3, measure = "auc")
+auc3@y.values[[1]]
+
+```
+
+
+This AUC value is fairly high, so it seems like this model would perform well in terms of classifying. 
+
+## KNN
+
+```{r}
+library(MASS)
+library(class)
+set.seed(1)
+haitiknn = knn(train = data.frame(Variables = Haiti$Red + Haiti$Green + Haiti$Blue), test = data.frame(Variables = Haiti$Red + Haiti$Green + Haiti$Blue), cl = Haiti$Class, prob = T)
+
+```
+
+
+### 10-Fold Cross Validation for KNN
+
+```{r}
+set.seed(1)
+tuneGrid =  expand.grid(k = seq(1, 30, by=2))
+
+KNNModel = train(Class ~ Blue + Red + Green, data=Haiti, 
+                 method='knn',
+                 metric='ROC',
+                 tuneGrid=tuneGrid,
+                 trControl=trControl) 
+
+KNNModel
+```
+
+```{r}
+ggplot(KNNModel$results, aes(x=k, y=Accuracy)) +
+  geom_point() + geom_line()
+```
+
+
+Based on cross-validation, we should use k=5 as the tuning parameter. As shown by the graph, this k value results in the highest accuracy. 
+
+### Determining the Threshold
+
+```{r}
+KNNresult = thresholder(KNNModel, seq(0,1, by=0.05), final = TRUE, statistics = "all")
+```
+
+```{r}
+plot(KNNresult$prob_threshold, KNNresult$`Pos Pred Value`)
+lines(KNNresult$prob_threshold, KNNresult$`Neg Pred Value`)
+
+plot(KNNresult$prob_threshold, KNNresult$Precision)
+
+# using Precision and Positive Prediction value, check for highest value for the threshold
+threshold4 = 0.9
+```
+
+
+Based on the highest precision and positive prediction value, I will use a threshold of 0.9 since that provides the best performance. 
+
+### Confusion Matrix and Performance Metrics for KNN
+
+```{r}
+cm4 = calculateConfusionMatrix(KNNModel, Haiti, threshold4)
+cm4$overall['Accuracy']
+cm4$byClass
+```
+
+
+Overall, these results seem to perform very well especially in terms of the accuracy, specificity, and precision. The sensitivity is slightly lower at 0.88 though. This still seems like promising results though for this scenario. 
+
+### ROC Curve and AUC for KNN
+
+```{r}
+library(ROCR)
+
+pred4 = predict(KNNModel,Haiti, type = "prob")
+pred4 = prediction(pred4$Other, Haiti$Class)
+roc4 = performance(pred4,"tpr","fpr")
+plot(roc4, lwd = 2)
+abline(a = 0, b = 1) 
+
+auc4 = performance(pred4, measure = "auc")
+auc4@y.values[[1]]
+```
+
+This ROC curve and AUC value are also very high, so it seems as though this model performs very well at classifing. 
+
+## Penalized Logistic Regression
+
+```{r}
+library(glmnet)
+attach(Haiti)
+
+set.seed(1)
+xHaiti = model.matrix(Class~Red+Green+Blue,Haiti)[,-1] #x matrix
+yHaiti = Haiti[,1] #y vector
+cvridge = cv.glmnet(xHaiti, yHaiti, alpha=0)
+cvlasso = cv.glmnet(xHaiti, yHaiti, alpha=1)
+plot(cvridge)
+plot(cvlasso)
+```
+
+These graphs help to illustrate what value of tuning parameter results in the lowest Mean-Squared Error. For ridge regression, the steepest increase in the MSE occurs between log(lambda) is between 5 and 8. Whereas for lasso, the steepest increase begins earlier when log(lambda) = 3 with the peak at 4. 
+
+### 10-Fold Cross Validation for Penalized Logistic Regression
+
+```{r}
+set.seed(1)
+lambdas = 10^seq(1, -3, by=-0.1)
+tuneGrid = expand.grid(alpha=0, 
+                       lambda=tail(lambdas, -3))
+
+PenLogRegModel = train(Class ~ Blue + Red + Green, data=Haiti, 
+                 method='glmnet', 
+                 tuneGrid = tuneGrid,
+                 trControl=trControl) 
+
+PenLogRegModel
+```
+
+```{r}
+ggplot(PenLogRegModel$results, aes(x=lambda, y=Accuracy)) +
+  geom_point() + geom_line()
+```
+
+
+The tuning parameter that results from cross-validation is alpha = 0 and lambda = 0.003981072, which results in the highest accuracy. 
+
+### Determining the Threshold
+
+```{r}
+PenLogRegResult = thresholder(PenLogRegModel, seq(0,1, by=0.05), final = TRUE, statistics = "all")
+```
+
+```{r}
+plot(PenLogRegResult$prob_threshold, PenLogRegResult$`Pos Pred Value`)
+lines(PenLogRegResult$prob_threshold, PenLogRegResult$`Neg Pred Value`)
+
+plot(PenLogRegResult$prob_threshold, PenLogRegResult$Precision)
+
+# using Precision and Positive Prediction value, check for highest value for the threshold
+threshold5 = 0.3
+```
+
+
+The threshold that provides the highest precision and positive prediction value is 0.3. 
+
+### Confusion Matrix and Performance Metrics for Penalized Logistic Regression
+
+```{r}
+cm5 = calculateConfusionMatrix(PenLogRegModel, Haiti, threshold5)
+cm5$overall['Accuracy']
+cm5$byClass
+```
+
+
+Although the accuracy, specificity, and the precision values are very high, but the sensitivity at 0.53 may be too low for this scenario. 
+
+### ROC Curve and AUC for Penalized Logistic Regression
+
+```{r}
+library(ROCR)
+
+pred5 = predict(PenLogRegModel,Haiti, type = "prob")
+pred5 = prediction(pred5$Other, Haiti$Class)
+roc5 = performance(pred5,"tpr","fpr")
+plot(roc5, lwd = 2)
+abline(a = 0, b = 1) 
+
+auc5 = performance(pred5, measure = "auc")
+auc5@y.values[[1]]
+```
+
+
+The AUC value is slightly lower than what has been seen with the other algorithms, but it is still overall high. 
+
+## Random Forest
+
+```{r}
+library(randomForest)
+set.seed(1)
+sampleH=sample(1:nrow(Haiti),nrow(Haiti)*0.5)
+trainH=Haiti[sampleH,1:3]
+testH=Haiti[-sampleH,1:3]
+trainY=Haiti[sampleH,4]
+testY=Haiti[-sampleH,4]
+
+Haitirf=randomForest(trainH,trainY,testH,testY, importance = TRUE)
+```
+
+
+### 10-Fold Cross Validation for Random Forest
+
+For cross-validation, because I am using Caret, I will be using the default number of trees = 500. Because 500 is such a large value, this will automatically account for the the tuning parameters that may occur when the number of trees is less than 500. 
+
+```{r}
+set.seed(1)
+RFModel = train(Class ~ Blue + Red + Green, data=Haiti, 
+                 method='rf', 
+                 family='binomial',
+                 metric='ROC',
+                 trControl=trControl,
+                ) 
+
+#https://topepo.github.io/caret/available-models.html
+
+RFModel
+```
+
+```{r}
+ggplot(RFModel$results, aes(x=mtry, y=Accuracy)) +
+  geom_point() + geom_line()
+```
+
+
+The tuning parameter from cross-validation is mtry = 2 since this results in the highest accuracy. 
+
+
+### Determining the Threshold
+
+```{r}
+RFResult= thresholder(RFModel, seq(0,1, by=0.05), final = TRUE, statistics = "all")
+```
+
+```{r}
+plot(RFResult$prob_threshold, RFResult$`Pos Pred Value`)
+lines(RFResult$prob_threshold, RFResult$`Neg Pred Value`)
+
+plot(RFResult$prob_threshold, RFResult$Precision)
+
+# using Precision and Positive Prediction value, check for highest value for the threshold
+threshold6 = 0.9
+```
+
+
+The threshold that results in the highest precision and positive prediction value is 0.9. 
+
+### Confusion Matrix and Performance Metrics for Random Forest
+
+```{r}
+cm6 = calculateConfusionMatrix(RFModel, Haiti, threshold6)
+cm6$overall['Accuracy']
+cm6$byClass
+```
+
+
+The performance here seems highly promising with a very high accuracy, specificity, and precision value. The sensitivity is slightly lower, but it is above .91, which is still a good performance. 
+
+### ROC Curve and AUC for Random Forest
+
+```{r}
+library(ROCR)
+
+pred6 = predict(RFModel,Haiti, type = "prob")
+pred6 = prediction(pred6$Other, Haiti$Class)
+roc6 = performance(pred6,"tpr","fpr")
+plot(roc6, lwd = 2)
+abline(a = 0, b = 1) 
+
+auc6 = performance(pred6, measure = "auc")
+auc6@y.values[[1]]
+```
+
+
+Also, the AUC value is great for this algorithm, which further illustrates that this may be the best to use for this scenario.
+
+
+## SVM
+
+I am using cross validation with three different kernels with library = kernlab (Radial, Linear, and Polynomial) to find the tuning parameters for each. 
+
+### Cross-Validation for SVM linear 
+
+```{r}
+#install.packages("kernlab")
+library(kernlab)
+
+set.seed(1)
+SVMModelLinear = train(Class ~ Blue + Red + Green, data=Haiti, 
+                 method='svmLinear', 
+                 family='binomial',
+                 metric='ROC',
+                 trControl=trControl,
+                ) 
+
+SVMModelLinear
+```
+
+
+With a linear SVM, the tuning parameter that should be used is Cost = 1 since that resulted in the highest accuracy.
+
+### Cross-Validation for SVM Polynomial 
+
+```{r}
+library(kernlab)
+
+set.seed(1)
+SVMModelPoly = train(Class ~ Blue + Red + Green, data=Haiti, 
+                 method='svmPoly', 
+                 family='binomial',
+                 metric='ROC',
+                 trControl=trControl,
+                ) 
+
+SVMModelPoly
+```
+
+
+With a polynomial SVM, the tuning parameters that are selected are degree = 3, scale = 0.1 and Cost = 0.25 since this resulted in the highest accuracy. 
+
+### Cross-Validation for SVM Radial
+
+```{r}
+library(kernlab)
+
+set.seed(1)
+SVMModelRadial = train(Class ~ Blue + Red + Green, data=Haiti, 
+                 method='svmRadial', 
+                 family='binomial',
+                 metric='ROC',
+                 trControl=trControl,
+                ) 
+
+SVMModelRadial
+```
+
+
+With a radial SVM, the tuning parameters that are selected are sigma = 8.297721 and Cost = 1 since this resulted in the highest accuracy. 
+
+
+### Linear SVM Model Plot
+```{r}
+ggplot(SVMModelLinear$results, aes(x=C, y=Accuracy)) +
+  geom_point() + geom_line()
+```
+
+
+### Polynomial SVM Model Plot
+```{r}
+ggplot(SVMModelPoly$results, aes(x=degree, y=Accuracy)) +
+  geom_point() + geom_line()
+```
+
+
+### Radial SVM Model Plot
+```{r}
+ggplot(SVMModelRadial$results, aes(x=sigma, y=Accuracy)) +
+  geom_point() + geom_line()
+```
+
+
+### Determining the Threshold for Linear SVM
+
+```{r}
+SVMLinearResult= thresholder(SVMModelLinear, seq(0,1, by=0.05), final = TRUE, statistics = "all")
+```
+
+```{r}
+plot(SVMLinearResult$prob_threshold, SVMLinearResult$`Pos Pred Value`)
+lines(SVMLinearResult$prob_threshold, SVMLinearResult$`Neg Pred Value`)
+
+plot(SVMLinearResult$prob_threshold, SVMLinearResult$Precision)
+
+# using Precision and Positive Prediction value, check for highest value for the threshold
+threshold7 = 0.2
+```
+
+
+### Determining the Threshold for Polynomial SVM
+
+```{r}
+SVMPolyResult= thresholder(SVMModelPoly, seq(0,1, by=0.05), final = TRUE, statistics = "all")
+```
+
+```{r}
+plot(SVMPolyResult$prob_threshold, SVMPolyResult$`Pos Pred Value`)
+lines(SVMPolyResult$prob_threshold, SVMPolyResult$`Neg Pred Value`)
+
+plot(SVMPolyResult$prob_threshold, SVMPolyResult$Precision)
+
+# using Precision and Positive Prediction value, check for highest value for the threshold
+threshold8 = 0.1
+```
+
+
+### Determining the Threshold for Radial SVM
+
+```{r}
+SVMRadialResult= thresholder(SVMModelRadial, seq(0,1, by=0.05), final = TRUE, statistics = "all")
+```
+
+```{r}
+plot(SVMRadialResult$prob_threshold, SVMRadialResult$`Pos Pred Value`)
+lines(SVMRadialResult$prob_threshold, SVMRadialResult$`Neg Pred Value`)
+
+plot(SVMRadialResult$prob_threshold, SVMRadialResult$Precision)
+
+# using Precision and Positive Prediction value, check for highest value for the threshold
+threshold9 = 0.1
+```
+
+
+### Confusion Matrix and Performance Metrics for Linear SVM 
+
+```{r}
+cm7 = calculateConfusionMatrix(SVMModelLinear, Haiti, threshold7)
+cm7$overall['Accuracy']
+cm7$byClass
+```
+
+
+The performance here is very high in terms of accuracy, specificity while the precision is slightly lower but still high at 0.93. 
+
+### Confusion Matrix and Performance Metrics for Polynomial SVM 
+
+```{r}
+cm8 = calculateConfusionMatrix(SVMModelPoly, Haiti, threshold8)
+cm8$overall['Accuracy']
+cm8$byClass
+```
+
+
+This performance seems to be slightly better especially with a very high sensitivity value of 0.98.
+
+### Confusion Matrix and Performance Metrics for Radial SVM 
+
+```{r}
+cm9 = calculateConfusionMatrix(SVMModelRadial, Haiti, threshold9)
+cm9$overall['Accuracy']
+cm9$byClass
+```
+
+
+The results here are also strong except the sensitivity is not as high as the polynomial and linear SVM. 
+
+### ROC Curve and AUC for SVM Linear
+
+```{r}
+library(ROCR)
+
+pred7 = predict(SVMModelLinear,Haiti, type = "prob")
+pred7 = prediction(pred7$Other, Haiti$Class)
+roc7 = performance(pred7,"tpr","fpr")
+plot(roc7, lwd = 2)
+abline(a = 0, b = 1) 
+
+auc7 = performance(pred7, measure = "auc")
+auc7@y.values[[1]]
+```
+
+This AUC value is very high, so it seems like it performs well in classifying between the two groups. 
+
+### ROC Curve and AUC for SVM Poly
+
+```{r}
+library(ROCR)
+
+pred8 = predict(SVMModelPoly,Haiti, type = "prob")
+pred8 = prediction(pred8$Other, Haiti$Class)
+roc8 = performance(pred8,"tpr","fpr")
+plot(roc8, lwd = 2)
+abline(a = 0, b = 1) 
+
+auc8 = performance(pred8, measure = "auc")
+auc8@y.values[[1]]
+```
+
+
+This AUC value is even higher than what was seen before with SVM linear. 
+
+### ROC Curve and AUC for SVM Radial
+
+```{r}
+library(ROCR)
+
+pred9 = predict(SVMModelRadial,Haiti, type = "prob")
+pred9 = prediction(pred9$Other, Haiti$Class)
+roc9 = performance(pred9,"tpr","fpr")
+plot(roc9, lwd = 2)
+abline(a = 0, b = 1) 
+
+auc9 = performance(pred9, measure = "auc")
+auc9@y.values[[1]]
+```
+
+
+This AUC value is also very but not higher than what was seem with SVM polynomial and linear. 
+
+## Hold Out Data
+
+At this point, the training data has helped determine the best-performing model and has identified the tuning parameters and thresholds that should be used for each model. Now, I will test the performance of these models against this the holdout data. 
+
+When attempting to understand how B1, B2, and B3 correspond to Red, Green, and Blue, I used https://www.rapidtables.com/web/color/RGB_Color.html. Using the blue tarp data, I plugged in the different values for a few observations to see what combination would result in a blue color. From this experimentation, I was able to determine that B1 = Red, B2 = Green, and B3 = Blue. Additionally, I will create histograms to understand this. Since I know that data2 = Blue, I'll create histograms with that dataset and for red, green, blue. This helps confirm that V8 = Red, V9 = Green, and V10 = Blue. First, I will load in the data then perform the histogram. 
+
+
+### Reading in all files
+
+When reading in the files, it is important to read in all 7 files. One was removed since that was a duplicate file. Then, extra heading needs to be removed from each one, and unnecessary columns need to be removed, as well. Then, red, green, and blue need to relabel V8, V9, V10 respectively. Finally, the class needs to be labeled appropriately as either blue tarp or other. This is evident because the text files in which the data arrived were labeled as Blue Tarp or NON Blue Tarp. 
+
+Once all the files are read in, then they all need to be merged to form one dataset that can be used as the hold out data. 
+
+#### Reading in first file
+https://stackoverflow.com/questions/34000789/import-txt-file-in-r-ignoring-first-few-lines
+
+```{r}
+#Reading in first one 
+
+line1 = readLines("~/Desktop/DS 6030/1orthovnir057_ROI_NON_Blue_Tarps.txt", n = 9)[9] 
+w1 = diff(c(0, gregexpr("\\S(?=\\s)", paste(line1, ""), perl = TRUE)[[1]])) 
+
+data1 = read.fwf("~/Desktop/DS 6030/1orthovnir057_ROI_NON_Blue_Tarps.txt", w1, skip = 8)
+```
+
+##### Removing all other columns except first one and last three
+https://www.listendata.com/2015/06/r-keep-drop-columns-from-data-frame.html
+
+```{r}
+data1 = data1[ -c(2:7) ]
+```
+
+##### Rename last three to red, green, blue respectively
+https://www.marsja.se/how-to-rename-column-or-columns-in-r-with-dplyr/
+
+```{r}
+names(data1)[names(data1) == 'V1'] = "Class"
+names(data1)[names(data1) == 'V8'] = "Red"
+names(data1)[names(data1) == 'V9'] = "Green"
+names(data1)[names(data1) == 'V10'] = "Blue"
+```
+
+##### Make all values in Class = "Other"
+
+```{r}
+data1$Class =  rep(c("Other"))
+```
+
+```{r}
+head(data1)
+```
+
+#### Reading in second file
+https://stackoverflow.com/questions/34000789/import-txt-file-in-r-ignoring-first-few-lines
+
+```{r}
+#Reading in second one 
+
+line2 = readLines("~/Desktop/DS 6030/2orthovnir067_ROI_Blue_Tarps.txt", n = 9)[9] 
+w2 = diff(c(0, gregexpr("\\S(?=\\s)", paste(line2, ""), perl = TRUE)[[1]])) 
+
+data2 = read.fwf("~/Desktop/DS 6030/2orthovnir067_ROI_Blue_Tarps.txt", w2, skip = 8)
+```
+
+##### Removing all other columns except first one and last three
+https://www.listendata.com/2015/06/r-keep-drop-columns-from-data-frame.html
+
+
+```{r}
+data2 = data2[ -c(2:7) ]
+```
+
+##### Rename last three to red, green, blue respectively
+https://www.marsja.se/how-to-rename-column-or-columns-in-r-with-dplyr/
+
+
+```{r}
+names(data2)[names(data2) == 'V1'] = "Class"
+names(data2)[names(data2) == 'V8'] = "Red"
+names(data2)[names(data2) == 'V9'] = "Green"
+names(data2)[names(data2) == 'V10'] = "Blue"
+```
+
+
+##### Make all values in Class = "Blue Tarps"
+
+
+```{r}
+data2$Class =  rep(c("Blue_Tarp"))
+```
+
+```{r}
+head(data2)
+```
+
+#### Reading in third file
+https://stackoverflow.com/questions/34000789/import-txt-file-in-r-ignoring-first-few-lines
+
+```{r}
+#Reading in third one 
+
+line3 = readLines("~/Desktop/DS 6030/3orthovnir067_ROI_NOT_Blue_Tarps.txt", n = 9)[9] 
+w3 = diff(c(0, gregexpr("\\S(?=\\s)", paste(line3, ""), perl = TRUE)[[1]])) 
+
+data3 = read.fwf("~/Desktop/DS 6030/3orthovnir067_ROI_NOT_Blue_Tarps.txt", w3, skip = 8)
+```
+
+##### Removing all other columns except first one and last three
+https://www.listendata.com/2015/06/r-keep-drop-columns-from-data-frame.html
+
+```{r}
+data3 = data3[ -c(2:7) ]
+```
+
+##### Rename last three to red, green, blue respectively
+https://www.marsja.se/how-to-rename-column-or-columns-in-r-with-dplyr/
+
+
+```{r}
+names(data3)[names(data3) == 'V1'] = "Class"
+names(data3)[names(data3) == 'V8'] = "Red"
+names(data3)[names(data3) == 'V9'] = "Green"
+names(data3)[names(data3) == 'V10'] = "Blue"
+```
+
+##### Make all values in Class = "Other"
+
+```{r}
+data3$Class =  rep(c("Other"))
+```
+
+```{r}
+head(data3)
+```
+
+#### Reading in fourth file
+https://stackoverflow.com/questions/34000789/import-txt-file-in-r-ignoring-first-few-lines
+
+```{r}
+#Reading in fourth one 
+
+line4 = readLines("~/Desktop/DS 6030/4orthovnir069_ROI_Blue_Tarps.txt", n = 9)[9] 
+w4 = diff(c(0, gregexpr("\\S(?=\\s)", paste(line4, ""), perl = TRUE)[[1]])) 
+
+data4 = read.fwf("~/Desktop/DS 6030/4orthovnir069_ROI_Blue_Tarps.txt", w4, skip = 8)
+```
+
+##### Removing all other columns except first one and last three
+https://www.listendata.com/2015/06/r-keep-drop-columns-from-data-frame.html
+
+
+```{r}
+data4 = data4[ -c(2:7) ]
+```
+
+##### Rename last three to red, green, blue respectively
+https://www.marsja.se/how-to-rename-column-or-columns-in-r-with-dplyr/
+
+
+```{r}
+names(data4)[names(data4) == 'V1'] = "Class"
+names(data4)[names(data4) == 'V8'] = "Red"
+names(data4)[names(data4) == 'V9'] = "Green"
+names(data4)[names(data4) == 'V10'] = "Blue"
+```
+
+##### Make all values in Class = "Blue Tarps"
+
+
+```{r}
+# Make all values in Class = "Blue Tarps"
+
+data4$Class =  rep(c("Blue_Tarp"))
+```
+
+```{r}
+head(data4)
+```
+
+#### Reading in fifth file
+https://stackoverflow.com/questions/34000789/import-txt-file-in-r-ignoring-first-few-lines
+
+```{r}
+#Reading in fifth one 
+
+line5 = readLines("~/Desktop/DS 6030/5orthovnir069_ROI_NOT_Blue_Tarps.txt", n = 9)[9] 
+w5 = diff(c(0, gregexpr("\\S(?=\\s)", paste(line5, ""), perl = TRUE)[[1]])) 
+
+data5 = read.fwf("~/Desktop/DS 6030/5orthovnir069_ROI_NOT_Blue_Tarps.txt", w5, skip = 8)
+```
+
+##### Removing all other columns except first one and last three
+https://www.listendata.com/2015/06/r-keep-drop-columns-from-data-frame.html
+
+```{r}
+data5 = data5[ -c(2:7) ]
+```
+
+##### Rename last three to red, green, blue respectively
+https://www.marsja.se/how-to-rename-column-or-columns-in-r-with-dplyr/
+
+
+```{r}
+names(data5)[names(data5) == 'V1'] = "Class"
+names(data5)[names(data5) == 'V8'] = "Red"
+names(data5)[names(data5) == 'V9'] = "Green"
+names(data5)[names(data5) == 'V10'] = "Blue"
+```
+
+##### Make all values in Class = "Other"
+
+```{r}
+data5$Class =  rep(c("Other"))
+```
+
+```{r}
+head(data5)
+```
+
+
+#### Reading in sixth file
+https://stackoverflow.com/questions/34000789/import-txt-file-in-r-ignoring-first-few-lines
+
+```{r}
+#Reading in sixth one 
+
+line6 = readLines("~/Desktop/DS 6030/6orthovnir078_ROI_Blue_Tarps.txt", n = 9)[9] 
+w6 = diff(c(0, gregexpr("\\S(?=\\s)", paste(line6, ""), perl = TRUE)[[1]])) 
+
+data6 = read.fwf("~/Desktop/DS 6030/6orthovnir078_ROI_Blue_Tarps.txt", w6, skip = 8)
+```
+
+##### Removing all other columns except first one and last three
+https://www.listendata.com/2015/06/r-keep-drop-columns-from-data-frame.html
+
+
+```{r}
+data6 = data6[ -c(2:7) ]
+```
+
+##### Rename last three to red, green, blue respectively
+https://www.marsja.se/how-to-rename-column-or-columns-in-r-with-dplyr/
+
+
+```{r}
+names(data6)[names(data6) == 'V1'] = "Class"
+names(data6)[names(data6) == 'V8'] = "Red"
+names(data6)[names(data6) == 'V9'] = "Green"
+names(data6)[names(data6) == 'V10'] = "Blue"
+```
+
+##### Make all values in Class = "Blue Tarps"
+
+
+```{r}
+data6$Class =  rep(c("Blue_Tarp"))
+```
+
+```{r}
+head(data6)
+```
+
+#### Reading in seventh file
+https://stackoverflow.com/questions/34000789/import-txt-file-in-r-ignoring-first-few-lines
+
+```{r}
+#Reading in seventh one 
+
+line7 = readLines("~/Desktop/DS 6030/7orthovnir078_ROI_NON_Blue_Tarps.txt", n = 9)[9] 
+w7 = diff(c(0, gregexpr("\\S(?=\\s)", paste(line7, ""), perl = TRUE)[[1]])) 
+
+data7 = read.fwf("~/Desktop/DS 6030/7orthovnir078_ROI_NON_Blue_Tarps.txt", w7, skip = 8)
+```
+
+##### Removing all other columns except first one and last three
+https://www.listendata.com/2015/06/r-keep-drop-columns-from-data-frame.html
+
+
+```{r}
+data7 = data7[ -c(2:7) ]
+```
+
+##### Rename last three to red, green, blue respectively
+https://www.marsja.se/how-to-rename-column-or-columns-in-r-with-dplyr/
+
+```{r}
+names(data7)[names(data7) == 'V1'] = "Class"
+names(data7)[names(data7) == 'V8'] = "Red"
+names(data7)[names(data7) == 'V9'] = "Green"
+names(data7)[names(data7) == 'V10'] = "Blue"
+```
+
+##### Make all values in Class = "Other"
+
+
+```{r}
+data7$Class =  rep(c("Other"))
+```
+
+
+```{r}
+head(data7)
+```
+
+#### Merge all 7 files together
+https://www.programmingr.com/examples/r-dataframe/merge-data-frames/
+
+```{r}
+final =  rbind(data1, data2, data3, data4, data5, data6, data7)
+```
+
+```{r}
+final$Class= factor(final$Class)
+levels(final$Class)
+contrasts(final$Class)
+```
+
+```{r}
+head(final)
+```
+
+### Histogram for how I determined red, green, blue
+
+```{r}
+line2b = readLines("~/Desktop/DS 6030/2orthovnir067_ROI_Blue_Tarps.txt", n = 9)[9] 
+w2b = diff(c(0, gregexpr("\\S(?=\\s)", paste(line2b, ""), perl = TRUE)[[1]])) 
+
+data2b = read.fwf("~/Desktop/DS 6030/2orthovnir067_ROI_Blue_Tarps.txt", w2b, skip = 8)
+```
+
+```{r}
+# Removing all other columns except first one and last three
+#https://www.listendata.com/2015/06/r-keep-drop-columns-from-data-frame.html
+
+data2b = data2b[ -c(2:7) ]
+```
+
+```{r}
+hist(data2b$V8)
+hist(data2b$V9)
+hist(data2b$V10)
+```
+
+## EDA for Hold-out Data
+
+```{r}
+#EDA
+
+# Box Plots
+par(mfrow=c(1,3))
+boxplot(final$Red~final$Class, main = "Boxplot of Red against Classes")
+boxplot(final$Green~final$Class, main = "Boxplot of Green against Classes")
+boxplot(final$Blue~final$Class, main = "Boxplot of Blue against Classes")
+```
+
+Regarding the box plots, we see similar results to what we saw with the training data set. Red and Green tend to overlap more between the Blue Tarp class and the other class. On the other hand, there is a clear distinction between Blue Tarps and Others in terms of the blue predictor variable. 
+
+```{r}
+#summary stats of variables
+plot(final$Class)
+
+summary(final$Red)
+summary(final$Green)
+summary(final$Blue)
+```
+
+This is also similar to what was shown with the training data set with many more observations of the other class as compared to the Blue Tarp class. 
+
+As explained above, I will now use the tuning parameters and thresholds that were established above for each model and see how the performance metrics for the hold out data compare to the training data. Additionally, like the training data set, this hold out data does not need to be split into training and test sets because the models will be tested against the entire hold out data set. 
+
+## Apply Tuned Model to Predict Hold-out Data
+
+```{r}
+# Model Training
+
+# Set up for all 1Models
+library(tidyverse)
+library(glmnet)
+library(caret)
+
+set.seed(1)
+
+# Set up for all Confusion Matrix and Performance Metrics
+calculateConfusionMatrix = function(model, data, threshold) {
+  prediction = predict(model, data, type='prob')$Blue_Tarp
+  predClass = as.factor(ifelse(prediction > threshold, 'Blue_Tarp', 'Other'))
+  return (confusionMatrix(data=predClass, reference=data$Class))
+}
+
+```
+
+
+## Logistic Regression
+
+### Confusion Matrix and Performance Metrics for Logisitic Regression
+
+```{r}
+cmfinal = calculateConfusionMatrix(LogRegModel, final, threshold)
+cmfinal$overall['Accuracy']
+cmfinal$byClass
+```
+
+The values here for accuracy, sensitivity, and specificity all seem high, but precision is very low at 0.23. 
+
+### ROC Curve and AUC for Logistic Regression
+
+```{r}
+library(ROCR)
+pred1f = predict(LogRegModel,final, type = "prob")
+pred1f = prediction(pred1f$Other, final$Class)
+roc1f = performance(pred1f,"tpr","fpr")
+plot(roc1f, lwd = 2)
+abline(a = 0, b = 1) 
+
+auc1f = performance(pred1f, measure = "auc")
+auc1f@y.values[[1]]
+```
+
+
+The AUC value is very high and seems like this algorithm works very well against the hold out data. 
+
+## LDA
+
+### Confusion Matrix and Performance Metrics for LDA
+
+```{r}
+cmfinal2 = calculateConfusionMatrix(LDAModel, final, threshold2)
+cmfinal2$overall['Accuracy']
+cmfinal2$byClass
+```
+
+With LDA, the sensitivity is not high at 0.72, and the precision also seems low at 0.27. 
+
+### ROC Curve and AUC for LDA
+
+```{r}
+library(ROCR)
+pred2f = predict(LDAModel,final, type = "prob")
+pred2f = prediction(pred2f$Other, final$Class)
+roc2f = performance(pred2f,"tpr","fpr")
+plot(roc2f, lwd = 2)
+abline(a = 0, b = 1) 
+
+auc2f = performance(pred2f, measure = "auc")
+auc2f@y.values[[1]]
+```
+
+
+Even though a couple of values in the performance table above were not as strong, the AUC value is very high. 
+
+## QDA
+
+### Confusion Matrix and Performance Metrics for QDA
+
+```{r}
+cmfinal3 = calculateConfusionMatrix(QDAModel, final, threshold3)
+cmfinal3$overall['Accuracy']
+cmfinal3$byClass
+```
+
+QDA performs slightly better, but the sensitivity is 0.72 along with the precision at 0.71. However, the accuracy and specifity are very high around 0.99. 
+
+### ROC Curve and AUC for QDA
+
+```{r}
+library(ROCR)
+pred3f = predict(QDAModel,final, type = "prob")
+pred3f = prediction(pred3f$Other, final$Class)
+roc3f = performance(pred3f,"tpr","fpr")
+plot(roc3f, lwd = 2)
+abline(a = 0, b = 1) 
+
+auc3f = performance(pred3f, measure = "auc")
+auc3f@y.values[[1]]
+```
+
+
+The AUC value here is also high at 0.99. 
+
+## KNN
+
+### Confusion Matrix and Performance Metrics for KNN
+
+```{r}
+cmfinal4 = calculateConfusionMatrix(KNNModel, final, threshold4)
+cmfinal4$overall['Accuracy']
+cmfinal4$byClass
+```
+
+The accuracy and specificity are high, however, the sensitivity and the precision seem low at 0.65.
+
+### ROC Curve and AUC for KNN
+
+```{r}
+library(ROCR)
+pred4f = predict(KNNModel,final, type = "prob")
+pred4f = prediction(pred4f$Other, final$Class)
+roc4f = performance(pred4f,"tpr","fpr")
+plot(roc4f, lwd = 2)
+abline(a = 0, b = 1) 
+
+auc4f = performance(pred4f, measure = "auc")
+auc4f@y.values[[1]]
+```
+
+This value is still high at 0.95 but not as high as what was seen previously. 
+
+## Penalized Logisitic Regression
+
+### Confusion Matrix and Performance Metrics for Penalized Logistic Regression
+
+```{r}
+cmfinal5 = calculateConfusionMatrix(PenLogRegModel, final, threshold5)
+cmfinal5$overall['Accuracy']
+cmfinal5$byClass
+```
+
+This model seems to perform overall except the sensitivity is slightly concerning at 0.43.
+
+### ROC Curve and AUC for Penalized Logistic Regression
+
+```{r}
+library(ROCR)
+pred5f = predict(PenLogRegModel,final, type = "prob")
+pred5f = prediction(pred5f$Other, final$Class)
+roc5f = performance(pred5f,"tpr","fpr")
+plot(roc5f, lwd = 2)
+abline(a = 0, b = 1) 
+
+auc5f = performance(pred5f, measure = "auc")
+auc5f@y.values[[1]]
+```
+
+
+This model seems to perform well for the AUC value overall. 
+
+## Random Forest
+
+### Confusion Matrix and Performance Metrics for Random Forest
+
+```{r}
+cmfinal6 = calculateConfusionMatrix(RFModel, final, threshold6)
+cmfinal6$overall['Accuracy']
+cmfinal6$byClass
+```
+
+This model has a very high accuracy and high specificity, but the sensivity is very low around 0.43 and precision at 0.78. 
+
+### ROC Curve and AUC for Random Forest
+
+```{r}
+library(ROCR)
+pred6f = predict(RFModel,final, type = "prob")
+pred6f = prediction(pred6f$Other, final$Class)
+roc6f = performance(pred6f,"tpr","fpr")
+plot(roc6f, lwd = 2)
+abline(a = 0, b = 1) 
+
+auc6f = performance(pred6f, measure = "auc")
+auc6f@y.values[[1]]
+```
+
+
+The AUC value is similar to others at 0.98. 
+
+## SVM 
+
+### Confusion Matrix and Performance Metrics for SVM with Linear Kernel
+
+```{r}
+cmfinal7 = calculateConfusionMatrix(SVMModelLinear, final, threshold7)
+cmfinal7$overall['Accuracy']
+cmfinal7$byClass
+```
+
+The accuracy, sensitivity, and specificity all seem to perform well with this model, but the precision is much lower than was seen with other models.
+
+### ROC Curve and AUC for SVM with Linear Kernel
+
+```{r}
+library(ROCR)
+pred7f = predict(SVMModelLinear,final, type = "prob")
+pred7f = prediction(pred7f$Other, final$Class)
+roc7f = performance(pred7f,"tpr","fpr")
+plot(roc7f, lwd = 2)
+abline(a = 0, b = 1) 
+
+auc7f = performance(pred7f, measure = "auc")
+auc7f@y.values[[1]]
+```
+
+This AUC value is extremely high at 0.999, which shows that this algorithm classifies well against the hold out data. 
+
+### Confusion Matrix and Performance Metrics for SVM with Polynomial Kernel
+
+```{r}
+cmfinal8 = calculateConfusionMatrix(SVMModelPoly, final, threshold8)
+cmfinal8$overall['Accuracy']
+cmfinal8$byClass
+```
+
+This model all seems to perform well except the precision seems to be low at 0.31.
+
+### ROC Curve and AUC for SVM with Polynomial Kernel
+
+```{r}
+library(ROCR)
+pred8f = predict(SVMModelPoly,final, type = "prob")
+pred8f = prediction(pred8f$Other, final$Class)
+roc8f = performance(pred8f,"tpr","fpr")
+plot(roc8f, lwd = 2)
+abline(a = 0, b = 1) 
+
+auc8f = performance(pred8f, measure = "auc")
+auc8f@y.values[[1]]
+```
+This AUC value is also very high at 0.9995. 
+
+### Confusion Matrix and Performance Metrics for SVM with Radial Kernel
+
+```{r}
+cmfinal9 = calculateConfusionMatrix(SVMModelRadial, final, threshold9)
+cmfinal9$overall['Accuracy']
+cmfinal9$byClass
+```
+
+This model seems similar to others in that the accuracy and specificity is high, but the sensitivity and precision are low around 0.3. 
+
+### ROC Curve and AUC for SVM with Radial Kernel
+
+```{r}
+library(ROCR)
+pred9f = predict(SVMModelRadial,final, type = "prob")
+pred9f = prediction(pred9f$Other, final$Class)
+roc9f = performance(pred9f,"tpr","fpr")
+plot(roc9f, lwd = 2)
+abline(a = 0, b = 1) 
+
+auc9f = performance(pred9f, measure = "auc")
+auc9f@y.values[[1]]
+```
+
+This AUC value also seems to perform overall well. 
+
+## Results
+
+True positive rate is sensitivity and false positive rate is 1-Specificity. 
+https://algolytics.com/how-to-assess-quality-and-correctness-of-classification-models-part-4-roc-curve/
+
+# Results from Training Data
+
+```{r}
+# cite: https://cran.r-project.org/web/packages/kableExtra/vignettes/awesome_table_in_html.html#Basic_HTML_table
+#install.packages("kableExtra")
+library(kableExtra)
+Disaster_Project1 = read.csv("Training Results.csv")
+Disaster_Project1 %>%
+  kbl() %>%
+  kable_styling()
+```
+
+# Results from Hold Out Data
+
+```{r}
+# cite: https://cran.r-project.org/web/packages/kableExtra/vignettes/awesome_table_in_html.html#Basic_HTML_table
+#install.packages("kableExtra")
+library(kableExtra)
+Disaster_Project2 = read.csv("Hold Out Results.csv")
+Disaster_Project2 %>%
+  kbl() %>%
+  kable_styling()
+```
+
+
+# Conclusions
+
+### Conclusion \#1: Determination of the best performing algorithm(s) in the cross-validation and hold-out data.
+
+To find the best model in cross-validation as well as the hold-out data, I compared AUC values, precision, true positive rates, false positive rates, and accuracy between all algorithms. In the training cross-validation data, the highest accuracy is found in both Support Vector Machines with a Radial kernel (and tuning parameter of sigma = 8.297721 and cost = 1) as well as Random forest (with tuning parameter of mtry = 2). The accuracies for both are 0.9972, however, all of the models had very strong accuracy performance with the lowest accuracy being 0.985, which belongs to LDA and Penalized Logistic Regression (with tuning parameters of alpha = 0 and lambda = 0.00398). In terms of true positive rate, this made it much easier to differentiate between the algorithms.  The highest true positive rate is 0.98, which belongs to Support Vector Machines with a polynomial kernel along with SVM - Radial performing very high as well with a TPR = 0.964. The other true positive rates were fairly lower, however, penalized logistic regression had the lowest true positive rate at 0.528. In terms of false positive rates, KNN, Penalized Logistic Regression, and Random Forest all performed well with 0 false positive rate. However, all models were very low with the highest false positive rate being 0.007 which belongs to LDA. Finally, with precision, KNN, Penalized Logistic Regression, and Random Forest, they all had perfect precision at 1. However, all had high performance except for LDA, which had the lowest precision at 0.769. Finally, in terms of AUROC values, they all had very high performance. However, if I did compare, LDA and Penalized Logistic Regression had the worst performance compared to the others, but that value is still around 0.98. 
+
+So, with the cross-validation set, the worst-performing model seems to be LDA since it had some of the worst values in these metrics. In terms of the best-performing model, it seems that KNN has the overall best performance. KNN has the highest AUROC value, SVM - Radial has the highest Accuracy, SVM-Polynomial has the highest true positive rate, but KNN, Penalized Logistic Regression, and Random Forest all had perfect false positive rates and precision.
+
+Therefore, it seems that overall KNN performs the best in AUROC, FPR, and Precision while its accuracy is high at 0.996. The only slightly concerning metric is the true positive rate at 0.88, but that is overall a high value. 
+
+To find the best algorithm in the hold-out data, I will use the same strategy as finding the best model for the cross-validation. In terms of accuracy, the worst-performing algorithm is SVM-Linear at Cost=1, which equaled 0.947. There was not this low of an accuracy level with the training data set. The highest accuracy from the hold-out data set is around 0.996 with QDA, KNN with k=5, and Penalized Logistic Regression. The true positive rates are also much lower with the hold out data set with the lowest being around 0.42 from Penalized Logistic Regression and Random Forest. However, the highest true positive rate results are around 0.99 from logistic regression, SVM- Linear, and SVM-Polynomial. In terms of false positive rates, they all seem to perform well, but the best performance is with penalized logistic regression at 0.00007. In terms of precision, none of the models seem to perform well except for Penalized Logistic Regression at 0.98. Logistic regression, LDA, SVM-linear, SVM-polynomial, and SVM radial are all under 0.5. Finally, in terms of AUROC values, they all seem to perform very well with the lowest value being KNN at 0.95.
+
+So, with the hold-out data set, QDA had the highest accuracy with Penalized Logistic Regression at a very similar value. SVM-Polynomial had the highest true positive rate, and Penalized Logistic Regression had the best value in terms of FRP and Precision. Finally, SVM-polynomial performs the best in terms of AUROC.
+
+Therefore, in this case with the hold-out data, it seems that Penalized Logistic Regression is performing the best. Compared to the training data set, Penalized Logistic Regression also had strong results with a high AUROC, high accuracy, 0 as the false positive rate, and 1 for precision. The only concerning metric for penalized logistic regression on the training data set is the true positive rate at 0.53. In terms of the training data, KNN had the best performance, and with the hold-out data set, KNN still does perform well in terms of AUROC, Accuracy, and FPR while both the TPR and Precision is just slightly over around 0.68. Therefore, it seems that either of these models will allow us to find more blue tarps to provide relief.
+
+
+### Conclusion \#2: Discussion or analysis justifying why your findings above are compatible or reconcilable
+
+Overall, it seems that the results are fairly similar between the training data set and the hold out data set. All models from both sets result in very high accuracy and high AUROC values. Additionally, both data sets resulted in low false positive rates. It seems that overall the true positive rates and precision from the hold out data set are slightly lower than what I saw with the training data set.
+
+However, it seems that both training and hold out data set seem to favor the same two models: Penalized Logistic Regression and KNN. This makes sense because both sample sizes for the training data set and the hold out data set were fairly large which allows for accurate training and testing. Because of this, these models were able to avoid overfitting or underfitting the data, and therefore, allows for fairly similar results between the two. The main differences I noted outside of the models was the drop in the TPR and the precision. True positive rate is the rate in which an actual blue tarp will test as a blue tarp whereas precision is how close the measurements are to each other. It makes sense that the true positive rate is slightly lower since we are working with real data, and it may not be as clear and distinguishable to find a blue tarp as there are several different shades of blue or different lighting. Precision also makes sense as the data is not as close to each other since it is real data that we cannot control as well as the training data.   
+
+
+### Conclusion \#3: A recommendation and rationale regarding which algorithm to use for detection of blue tarps
+
+For this type of problem, it seems that Penalized Logistic Regression or KNN would perform to best in terms of detecting blue tarps. KNN especially seems to perform well overall because it is mainly meant to work well in regression or classification problems because it works by estimating how likely an observation will be a member of a particular group based on its nearest neighbors. Therefore, because we have a classification problem in which the data is similar to each other and does not need to be scaled, KNN is able to perform very well. Penalized Logistic Regression also seems to perform well by placing a penalty with the addition of more predictors. Even though there are only three predictors, the penalty that is being used as the tuning parameter is resulting in well-performing results for most of the metrics for both data sets. 
+
+
+### Conclusion \#4: A discussion of the relevance of the metrics calculated in the tables to this application context
+
+The metrics that were used for this project are AUROC, Accuracy, TPR, FPR, and Precision. All of these metrics seem highly relevant to the context that we are trying to solve as our goal is to locate as many blue tarps as possible in order to help displaced individuals who are most likely within these tarps. AUROC value is the value of the TPR over the FPR, so this shows the ability of the classifier models to distinguish between the two classes. This is very important for this context since the entire goal is to distinguish between blue tarps and other material. Therefore, AUROC is an important value to consider. Accuracy is also important as that informs us on how accurate the model is, which is important as this is a timely project since we need to locate individuals under blue tarps as efficiently and accurately as possible. True positive rate is also important because it helps with the efficiency as this measures how likely it is that an actual blue tarp will test as a blue tarp, and the false positive rate is also important because that measures how often a different material gets tested and labeled as a blue tarp. It is important for this situation to have a high TPR and and low FPR because we want to make sure that we are finding blue tarps and not accidentally wasting time on false positives or false negatives. I feel as though precision is less important than the other metrics but still important for this project because we want to ensure that the data points are not too spread apart from each other.  
+
+
+### Conclusion \#5: A Different Model that Performs Well
+
+Looking at all of the results though, it seems that any of these models would perform well as the AUROC and the Accuracy is high for all models with the training and the hold out data set. As noted previously, AUROC is one of the most important metrics for this type of project because the ability to locate blue tarps against other materials in an accurate fashion is important to do quickly in situations like this. I believe that the next best model for this type of situation would be Random Forest. The values for both the training and the hold out data set appeared to be fairly high for all metrics. Additionally, random forest models help because they reduce overfitting, which can improve the accuracy of the model. Also, it works well with regression and classification problems, and it works well with different types of variables like pixel data. It seems that LDA may be the only algorithm that is not as well-suited for this project. 
+
+
+### Conclusion \#6: Future Enhancements
+
+In order to improve results for this project, I may want to look into more metrics to ensure that I am considering everything that may be helpful in locating displaced individuals under blue tarps. I think that the metrics used for this project have been very informative, but it may be helpful to include more metrics that further explain how successful these models are in classifying blue tarps against other types of material despite the different shades of blue or the lighting. In addition to looking at the metrics, it may be helpful to include more predictors into this model. For example, it may be helpful to somehow use the location coordinates because I assume that individuals may be staying together, so there may be several blue tarps next to each other rather than spread apart. Or, it may be the case that it is difficult to group blue tarps, so blue tarps may be scattered rather than clumped. I think using the location coordinates at least for EDA would help because then we can try to understand where we may be able to find more blue tarps more quickly. 
+
+
+### Conclusion \#7: Suitability 
+
+It seems that this data is most well-suited for KNN prediction methods because KNN works well with logistic or classification problems, and it assigns values based on its nearest neighbors. It is also helpful to use KNN for this model because KNN works best when predictor variables are scaled. In this case, all of the predictor variables are the same type of data, so KNN is able to provide a more accurate estimate due to this. In many of the metrics, LDA seemed to perform the worst for this problem. LDA is mainly used to reduce the dimensionality of the predictors. Because there are only three predictors that are pixel data, this may explain why LDA is not well-suited for this data. 
+
+### Conclusion \#8: Comparing the Tuning Parameters and Thresholds
+
+The tuning parameters and thresholds that were established with the training data seem to have some similarities. Logistic regression, QDA, Penalized Logistic Regression, and all SVM models have a threshold below 0.5 while LDA, KNN, and Random Forest all had a high threshold at 0.9. The threshold was found by seeing what resulted in the highest precision as well as what resulted in the highest positive prediction value. In this case, I am more concerned about False Negatives (classifying a blue tarp as not a blue tarp) because I want to make sure that I am capturing all blue tarps and not potentially miss any. In that case, it usually makes more sense to lower the threshold. Therefore, for future enhancements, I would like to further understand why 0.9 seemed to perform the best for those three algorithms. In terms of the tuning parameters, the main differences were between the three SVM models. It was interesting that different cost values were established, so for future enhancements, I would like to understand why SVM - Linear and SVM - Radial would have the same cost tuning parameter but SVM - polynomial would be different. 
+
+
+### Conclusion \#9: Effectiveness for Real-Life Disaster Relief
+
+It seems as though most of these models could actually be very useful for locating blue tarps and therefore, help to save human life. By using the pixels from image data and with these models and methods, the ability to locate blue tarps does seem possible with these results. Additionally, the AUROC values and the accuracies that are obtained with any of these methods clearly show that these results are highly effective and that we can be confident with these models especially when using a KNN algorithm. The ability to confidently and quickly classify between a blue tarp and something else is so important in life-and-death situations like this. Therefore, it also helps that KNN can run faster than the Random Forest or SVM algorithms. Choosing a well-suited model that provides well-performing metrics at a fairly quick run time makes me confident that we can use these models, tuning parameters, and thresholds to locate blue tarps from pixel data. 
+
+```{r, echo=FALSE}
+knitr::knit_exit()  
